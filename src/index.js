@@ -7,7 +7,7 @@ import * as github from "@actions/github"
 import * as tc from "@actions/tool-cache"
 import { Octokit } from "@octokit/rest"
 
-import { execShellCommand, getValidatedInput, getLinuxDistro } from "./helpers"
+import { execShellCommand, getValidatedInput, getLinuxDistro, useSudoPrefix } from "./helpers"
 
 const TMATE_LINUX_VERSION = "2.4.0"
 
@@ -26,20 +26,78 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 export async function run() {
   try {
+    /*  Indicates whether the POST action is running */
+    if (!!core.getState('isPost')) {
+      const message = core.getState('message')
+      const tmate = core.getState('tmate')
+      if (tmate && message) {
+        const shutdown = async () => {
+          core.error('Got signal')
+          await execShellCommand(`${tmate} kill-session`)
+          process.exit(1)
+        }
+        // This is needed to fully support canceling the post-job Action, for details see
+        // https://docs.github.com/en/actions/managing-workflow-runs/canceling-a-workflow#steps-github-takes-to-cancel-a-workflow-run
+        process.on('SIGINT', shutdown)
+        process.on('SIGTERM', shutdown)
+        core.debug("Waiting")
+        const hasAnyoneConnectedYet = (() => {
+          let result = false
+          return async () => {
+            return result ||=
+              !didTmateQuit()
+              && '0' !== await execShellCommand(`${tmate} display -p '#{tmate_num_clients}'`, { quiet: true })
+          }
+        })()
+
+        let connectTimeoutSeconds = parseInt(core.getInput("connect-timeout-seconds"))
+        if (Number.isNaN(connectTimeoutSeconds) || connectTimeoutSeconds <= 0) {
+          connectTimeoutSeconds = 10 * 60
+        }
+
+        for (let seconds = connectTimeoutSeconds; seconds > 0; ) {
+          console.log(`${
+            await hasAnyoneConnectedYet()
+            ? 'Waiting for session to end'
+            : `Waiting for client to connect (at most ${seconds} more second(s))`
+          }\n${message}`)
+
+          if (continueFileExists()) {
+            core.info("Exiting debugging session because the continue file was created")
+            break
+          }
+
+          if (didTmateQuit()) {
+            core.info("Exiting debugging session 'tmate' quit")
+            break
+          }
+
+          await sleep(5000)
+          if (!await hasAnyoneConnectedYet()) seconds -= 5
+        }
+      }
+      return
+    }
+
     let tmateExecutable = "tmate"
     if (core.getInput("install-dependencies") !== "false") {
       core.debug("Installing dependencies")
       if (process.platform === "darwin") {
         await execShellCommand('brew install tmate');
       } else if (process.platform === "win32") {
-        await execShellCommand('pacman -Sy --noconfirm tmate');
+        await execShellCommand('pacman -S --noconfirm tmate');
       } else {
-        const optionalSudoPrefix = core.getInput("sudo") === "true" ? "sudo " : "";
+        const optionalSudoPrefix = useSudoPrefix() ? "sudo " : "";
         const distro = await getLinuxDistro();
         core.debug("linux distro: [" + distro + "]");
         if (distro === "alpine") {
           // for set -e workaround, we need to install bash because alpine doesn't have it
           await execShellCommand(optionalSudoPrefix + 'apk add openssh-client xz bash');
+        } else if (distro === "arch") {
+          // partial upgrades are not supported so also upgrade everything
+          await execShellCommand(optionalSudoPrefix + 'pacman -Syu --noconfirm xz openssh');
+        } else if (distro === "fedora" || distro === "centos" || distro === "rhel" || distro === "almalinux") {
+          await execShellCommand(optionalSudoPrefix + 'dnf install -y xz openssh');
         } else {
           await execShellCommand(optionalSudoPrefix + 'apt-get update');
           await execShellCommand(optionalSudoPrefix + 'apt-get install -y openssh-client xz-utils');
@@ -74,21 +132,28 @@ export async function run() {
     }
 
     let newSessionExtra = ""
-    if (core.getInput("limit-access-to-actor") === "true") {
-      const { actor } = github.context
-      const octokit = new Octokit()
+    let tmateSSHDashI = ""
+    let publicSSHKeysWarning = ""
+    const limitAccessToActor = core.getInput("limit-access-to-actor")
+    if (limitAccessToActor === "true" || limitAccessToActor === "auto") {
+      const { actor, apiUrl } = github.context
+      const auth = core.getInput('github-token')
+      const octokit = new Octokit({ auth, baseUrl: apiUrl, request: { fetch }});
 
       const keys = await octokit.users.listPublicKeysForUser({
         username: actor
       })
       if (keys.data.length === 0) {
-        throw new Error(`No public SSH keys registered with ${actor}'s GitHub profile`)
+        if (limitAccessToActor === "auto") publicSSHKeysWarning = `No public SSH keys found for ${actor}; continuing without them even if it is less secure (please consider adding an SSH key, see https://docs.github.com/en/authentication/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account)`
+        else throw new Error(`No public SSH keys registered with ${actor}'s GitHub profile`)
+      } else {
+        const sshPath = path.join(os.homedir(), ".ssh")
+        await fs.promises.mkdir(sshPath, { recursive: true })
+        const authorizedKeysPath = path.join(sshPath, "authorized_keys")
+        await fs.promises.writeFile(authorizedKeysPath, keys.data.map(e => e.key).join('\n'))
+        newSessionExtra = `-a "${authorizedKeysPath}"`
+        tmateSSHDashI = "ssh -i <path-to-private-SSH-key>"
       }
-      const sshPath = path.join(os.homedir(), ".ssh")
-      await fs.promises.mkdir(sshPath, { recursive: true })
-      const authorizedKeysPath = path.join(sshPath, "authorized_keys")
-      await fs.promises.writeFile(authorizedKeysPath, keys.data.map(e => e.key).join('\n'))
-      newSessionExtra = `-a "${authorizedKeysPath}"`
     }
 
     const tmate = `${tmateExecutable} -S /tmp/tmate.sock`;
@@ -125,12 +190,48 @@ export async function run() {
     const tmateSSH = await execShellCommand(`${tmate} display -p '#{tmate_ssh}'`);
     const tmateWeb = await execShellCommand(`${tmate} display -p '#{tmate_web}'`);
 
+    /*
+      * Publish a variable so that when the POST action runs, it can determine
+      * it should run the appropriate logic. This is necessary since we don't
+      * have a separate entry point.
+      *
+      * Inspired by https://github.com/actions/checkout/blob/v3.1.0/src/state-helper.ts#L56-L60
+      */
+    core.saveState('isPost', 'true')
+
+    const detached = core.getInput("detached")
+    if (detached === "true") {
+      core.debug("Entering detached mode")
+
+      let message = ''
+      if (publicSSHKeysWarning) {
+        message += `::warning::${publicSSHKeysWarning}\n`
+      }
+      if (tmateWeb) {
+        message += `::notice::Web shell: ${tmateWeb}\n`
+      }
+      message += `::notice::SSH: ${tmateSSH}\n`
+      if (tmateSSHDashI) {
+        message += `::notice::or: ${tmateSSH.replace(/^ssh/, tmateSSHDashI)}\n`
+      }
+      core.saveState('message', message)
+      core.saveState('tmate', tmate)
+      console.log(message)
+      return
+    }
+
     core.debug("Entering main loop")
     while (true) {
+      if (publicSSHKeysWarning) {
+        core.warning(publicSSHKeysWarning)
+      }
       if (tmateWeb) {
         core.info(`Web shell: ${tmateWeb}`);
       }
       core.info(`SSH: ${tmateSSH}`);
+      if (tmateSSHDashI) {
+        core.info(`or: ${tmateSSH.replace(/^ssh/, tmateSSHDashI)}`)
+      }
 
       if (continueFileExists()) {
         core.info("Exiting debugging session because the continue file was created")

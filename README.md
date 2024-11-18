@@ -27,7 +27,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Setup tmate session
       uses: mxschmitt/action-tmate@v3
 ```
@@ -48,7 +48,7 @@ on:
     inputs:
       debug_enabled:
         type: boolean
-        description: 'Run the build with tmate debugging enabled (https://github.com/marketplace/actions/debugging-with-tmate)'     
+        description: 'Run the build with tmate debugging enabled (https://github.com/marketplace/actions/debugging-with-tmate)'
         required: false
         default: false
 ```
@@ -74,6 +74,26 @@ jobs:
 
 You can then [manually run a workflow](https://docs.github.com/en/actions/managing-workflow-runs/manually-running-a-workflow) on the desired branch and set `debug_enabled` to true to get a debug session.
 
+## Detached mode
+
+By default, this Action starts a `tmate` session and waits for the session to be done (typically by way of a user connecting and exiting the shell after debugging). In detached mode, this Action will start the `tmate` session, print the connection details, and continue with the next step(s) of the workflow's job. At the end of the job, the Action will wait for the session to exit.
+
+```yaml
+name: CI
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup tmate session
+      uses: mxschmitt/action-tmate@v3
+      with:
+        detached: true
+```
+
+By default, this mode will wait at the end of the job for a user to connect and then to terminate the tmate session. If no user has connected within 10 minutes after the post-job step started, it will terminate the `tmate` session and quit gracefully.
+
 ## Without sudo
 
 By default we run installation commands using sudo on Linux. If you get `sudo: not found` you can use the parameter below to execute the commands directly.
@@ -85,7 +105,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Setup tmate session
       uses: mxschmitt/action-tmate@v3
       with:
@@ -103,7 +123,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Setup tmate session
       uses: mxschmitt/action-tmate@v3
       timeout-minutes: 15
@@ -112,6 +132,9 @@ jobs:
 ## Only on failure
 By default a failed step will cause all following steps to be skipped. You can specify that the tmate session only starts if a previous step [failed](https://docs.github.com/en/actions/learn-github-actions/expressions#failure).
 
+<!--
+{% raw %}
+-->
 ```yaml
 name: CI
 on: [push]
@@ -119,15 +142,18 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Setup tmate session
       if: ${{ failure() }}
       uses: mxschmitt/action-tmate@v3
 ```
+<!--
+{% endraw %}
+-->
 
 ## Use registered public SSH key(s)
 
-By default anybody can connect to the tmate session. You can opt-in to install the public SSH keys [that you have registered with your GitHub profile](https://docs.github.com/en/github/authenticating-to-github/adding-a-new-ssh-key-to-your-github-account).
+If [you have registered one or more public SSH keys with your GitHub profile](https://docs.github.com/en/github/authenticating-to-github/adding-a-new-ssh-key-to-your-github-account), tmate will be started such that only those keys are authorized to connect, otherwise anybody can connect to the tmate session. If you want to require a public SSH key to be installed with the tmate session, no matter whether the user who started the workflow has registered any in their GitHub profile, you will need to configure the setting `limit-access-to-actor` to `true`, like so:
 
 ```yaml
 name: CI
@@ -136,7 +162,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Setup tmate session
       uses: mxschmitt/action-tmate@v3
       with:
@@ -156,7 +182,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Setup tmate session
       uses: mxschmitt/action-tmate@v3
       with:
@@ -184,7 +210,7 @@ jobs:
 
 ## Continue a workflow
 
-If you want to continue a workflow and you are inside a tmate session, just create a empty file with the name `continue` either in the root directory or in the project directory by running `touch continue` or `sudo touch /continue`.
+If you want to continue a workflow and you are inside a tmate session, just create a empty file with the name `continue` either in the root directory or in the project directory by running `touch continue` or `sudo touch /continue` (on Linux).
 
 ## Connection string / URL is not visible
 

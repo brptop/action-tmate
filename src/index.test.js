@@ -9,7 +9,12 @@ jest.mock("fs", () => ({
   mkdirSync: () => true,
   existsSync: () => true,
   unlinkSync: () => true,
-  writeFileSync: () => true
+  writeFileSync: () => true,
+  promises: new Proxy({}, {
+    get: () => {
+      return () => true
+    }
+  })
 }));
 jest.mock('./helpers', () => {
   const originalModule = jest.requireActual('./helpers');
@@ -39,7 +44,7 @@ describe('Tmate GitHub integration', () => {
     const customConnectionString = "foobar"
     execShellCommand.mockReturnValue(Promise.resolve(customConnectionString))
     await run()
-    expect(execShellCommand).toHaveBeenNthCalledWith(1, "pacman -Sy --noconfirm tmate");
+    expect(execShellCommand).toHaveBeenNthCalledWith(1, "pacman -S --noconfirm tmate");
     expect(core.info).toHaveBeenNthCalledWith(1, `Web shell: ${customConnectionString}`);
     expect(core.info).toHaveBeenNthCalledWith(2, `SSH: ${customConnectionString}`);
     expect(core.info).toHaveBeenNthCalledWith(3, "Exiting debugging session because the continue file was created");
@@ -52,7 +57,7 @@ describe('Tmate GitHub integration', () => {
     const customConnectionString = "foobar"
     execShellCommand.mockReturnValue(Promise.resolve(customConnectionString))
     await run()
-    expect(execShellCommand).not.toHaveBeenNthCalledWith(1, "pacman -Sy --noconfirm tmate");
+    expect(execShellCommand).not.toHaveBeenNthCalledWith(1, "pacman -S --noconfirm tmate");
     expect(core.info).toHaveBeenNthCalledWith(1, `Web shell: ${customConnectionString}`);
     expect(core.info).toHaveBeenNthCalledWith(2, `SSH: ${customConnectionString}`);
     expect(core.info).toHaveBeenNthCalledWith(3, "Exiting debugging session because the continue file was created");
